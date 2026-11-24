@@ -20,6 +20,7 @@ from app.services.series_lineage import SeriesLineageService
 from app.services.series_export import SeriesExportService
 from app.services.series_quality import SeriesQualityService
 from app.services.series_snapshot import SeriesSnapshotService
+from app.services.range_query import RangeQueryService
 
 SERVICES: dict[str, BaseModuleService] = {
     "sensor_point": SensorPointService(),
@@ -40,6 +41,7 @@ SERVICES: dict[str, BaseModuleService] = {
     "series_export": SeriesExportService(),
     "series_quality": SeriesQualityService(),
     "series_snapshot": SeriesSnapshotService(),
+    "range_query": RangeQueryService(),
 }
 
 

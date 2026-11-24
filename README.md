@@ -79,3 +79,73 @@ npm run dev
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA
+
+## 降采样窗口时间迁移（v2）
+
+旧版降采样产物只有窗口序号（`window_index`），新版产物同时记录窗口开始/结束时刻。
+迁移在不破坏旧归档的前提下增加一层**时间区间索引**，查询可以逐步从“按旧序号”
+切到“按时间区间”，也可以随时回滚。
+
+### 数据产物
+
+| 产物 | 位置 | 用途 |
+| --- | --- | --- |
+| 时间区间索引 | `data/series_index/<索引编号>_interval.jsonl` | 带 `window_start`/`window_end`，并保留 `window_id`/`window_index` |
+| 旧序号索引 | `data/series_index/<索引编号>_legacy.jsonl` | 覆盖全部旧产物（含只有条数的），按 `window_id#window_index` 回读 |
+| 构建清单 | `data/series_index/<索引编号>_manifest.json` | 覆盖率、时间粒度、旧窗口标识、待补证项、查询口径 |
+| 兼容产物 | `data/series_index/<索引编号>_index.jsonl` | 下游（冷热分层/导出）沿用的旧文件名，内容为时间区间记录 |
+| 查询请求日志 | `data/range_queries/<请求编号>.jsonl` | 受理、补证、确认、重放的全过程 |
+
+### 时基判定规则
+
+- **新版产物**自带 `window_start`/`window_end`，直接进入时间区间索引；
+- **旧任务**只有在登记了「采集开始时刻」+「窗口宽度」时才可推算区间并进入时间区间索引；
+- **只有条数**（或其他无法解析的证据）的旧任务不进入时间区间索引，
+  只保留旧序号回读，并在清单的 `pending_evidence` 里列明原因；
+- 归并产物的 `window_start` 是**记录序号**，不能当时间；只有归并时由成员降采样
+  推导出的 `window_start_time`/`window_end_time` 才可入索引；
+- 同序号但时基/粒度不同的旧窗口按 `window_id` 分组，绝不按序号合并。
+
+### 接口
+
+```bash
+# 构建（沿用通用资源接口的动作，或直接调用服务）
+curl -X POST -H 'content-type: application/json' \
+  -d '{"action":"确认构建"}' http://127.0.0.1:8000/api/series_index/1/actions
+
+# 构建清单 / 时间区间查询 / 旧序号回读
+curl http://127.0.0.1:8000/api/series_index/IDX-DEMO/manifest
+curl -X POST -H 'content-type: application/json' -d '{"start":"2026-09-01T10:00:00Z","end":"2026-09-01T10:20:00Z"}' \
+  http://127.0.0.1:8000/api/series_index/IDX-DEMO/query/time
+curl -X POST -H 'content-type: application/json' -d '{"window_id":"DOWN-DEMO-B","start_ordinal":1,"end_ordinal":12}' \
+  http://127.0.0.1:8000/api/series_index/IDX-DEMO/query/ordinals
+
+# 切换 / 回滚（切换前会核对归并历史依赖仍在索引内）
+curl -X POST -H 'content-type: application/json' -d '{"mode":"时间区间"}' \
+  http://127.0.0.1:8000/api/series_index/IDX-DEMO/switch
+curl -X POST http://127.0.0.1:8000/api/series_index/IDX-DEMO/rollback
+
+# 查询受理 -> 补证 -> 确认；以及当场重放
+curl -X POST http://127.0.0.1:8000/api/range_query/1/accept
+curl -X POST -H 'content-type: application/json' \
+  -d '{"window_id":"DOWN-DEMO-A","anchor":"2026-09-01T10:00:00Z","window_width":"60s"}' \
+  http://127.0.0.1:8000/api/range_query/1/verify
+curl -X POST http://127.0.0.1:8000/api/range_query/1/confirm
+curl -X POST -H 'content-type: application/json' -d '{"metric":"均值"}' \
+  http://127.0.0.1:8000/api/range_query/1/replay
+```
+
+### 一键迁移验证
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/series_index/migration/seed-demo
+```
+
+该接口用**两份序号相同、粒度不同（60s/30s）的旧产物 + 一份新版产物**构造
+`SENS-DEMO` 测点，依次执行构建、切换到时间区间、按时间查询和回滚，并返回：
+
+- 三类产物各自可定位的实际窗口（`build` / `query`）；
+- 回滚后仍可按旧序号读到的分组（`rollback.ordinal_groups`）；
+- 缺乏时间依据、只能按旧序号复盘的历史范围（`rollback.ranges_without_time_basis`）。
+
+前端模块列表中新增「区间查询」（`/range_query`），用于查看受理、补证与交付状态。

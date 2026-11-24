@@ -117,6 +117,14 @@ class BaseModuleService:
                 written += 1
         return written
 
+    def _write_jsonl_replace(self, filepath: Path, records: list[dict[str, Any]]) -> int:
+        """覆盖写入 JSONL 文件，用于索引/重放等需要幂等重建的数据产物。"""
+        _ensure_dir(filepath.parent)
+        with open(filepath, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        return len(records)
+
     def _read_jsonl(self, filepath: Path) -> list[dict[str, Any]]:
         """从 JSONL 文件逐行读取记录列表，用于跨模块共享数据产物。"""
         if not filepath.exists():

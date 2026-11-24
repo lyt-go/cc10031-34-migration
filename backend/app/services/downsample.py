@@ -5,8 +5,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.services import time_basis
 from app.services.base import BaseModuleService
 from app.store import store
+
+# 降采样产物格式版本：v2 起每个窗口额外记录窗口开始/结束时刻，
+# v1 产物只有 window_index（旧序号），仍可按序号回读。
+PRODUCT_SCHEMA_VERSION = "v2"
+LEGACY_SCHEMA_VERSION = "v1"
 
 
 class DownsampleService(BaseModuleService):
@@ -43,6 +49,8 @@ class DownsampleService(BaseModuleService):
         source_freq = float(entry.get("源采样频率", "10").replace("Hz", ""))
         target_freq = float(entry.get("目标频率", "1").replace("Hz", ""))
         window_size = max(1, int(source_freq / target_freq))
+        declared_anchor, _ = time_basis.resolve_anchor(entry)
+        declared_width, _ = time_basis.resolve_window_width(entry)
         downsampled = []
         for i in range(0, len(records), window_size):
             window = records[i:i + window_size]
@@ -64,10 +72,28 @@ class DownsampleService(BaseModuleService):
                 agg_val = round(min(values), 4)
             else:
                 agg_val = round(sum(values) / len(values), 4)
+            ordinal = len(downsampled) + 1
+            # 新版窗口：从采样时间戳确定性算出窗口开始/结束时刻
+            start, end, grain = time_basis.explicit_window_times(window)
+            time_basis_label = "explicit"
+            if start is None or end is None:
+                # 源数据没有时间戳时退回到任务登记的锚点 + 宽度
+                if declared_anchor is not None and declared_width:
+                    start, end = time_basis.legacy_window_interval(
+                        declared_anchor, declared_width, ordinal)
+                    grain = declared_width
+                    time_basis_label = "declared"
+                else:
+                    time_basis_label = "ordinal_only"
             downsampled.append({
                 "task_id": entry["任务编号"],
                 "point": point_key,
-                "window_index": len(downsampled) + 1,
+                "window_index": ordinal,
+                "window_start": time_basis.format_ts(start),
+                "window_end": time_basis.format_ts(end),
+                "window_grain_seconds": grain,
+                "time_basis": time_basis_label,
+                "schema_version": PRODUCT_SCHEMA_VERSION,
                 "source_count": len(window),
                 "aggregated_value": agg_val,
                 "method": agg_method,
@@ -81,9 +107,12 @@ class DownsampleService(BaseModuleService):
         entry["压缩比"] = str(compression_ratio)
         entry["任务水位"] = str(written)
         self.run_action(task_id, "标记完成")
+        timed = sum(1 for r in downsampled if r.get("window_start") and r.get("window_end"))
         return {"task_id": entry["任务编号"], "point": point_key,
                 "input_records": len(records), "output_points": written,
-                "compression_ratio": compression_ratio, "method": agg_method}
+                "compression_ratio": compression_ratio, "method": agg_method,
+                "schema_version": PRODUCT_SCHEMA_VERSION,
+                "windows_with_time": timed, "windows_ordinal_only": written - timed}
 
     def batch_downsample(self, point_keys: list[str], agg_method: str = "均值") -> dict[str, Any]:
         """批量对多个测点的时序数据执行降采样聚合转换。"""
